@@ -38,9 +38,11 @@ const DEVICES: { value: Device; label: string; hint: string }[] = [
 ];
 
 const STALL_WARNING_MS = 20_000;
+const MODEL_CHECK_TIMEOUT_MS = 10_000;
 
 let currentCacheKey = '';
 let currentAsr: Awaited<ReturnType<typeof pipeline>> | null = null;
+const checkedModels = new Set<string>();
 
 const formatSeconds = (value: number): string => {
   const safeValue = Math.max(0, Number.isFinite(value) ? value : 0);
@@ -71,6 +73,154 @@ const getNormalizedPercent = (value?: number): number | null => {
   return Math.min(100, Math.max(0, Math.round(value)));
 };
 
+const getErrorMessage = (error: unknown): string => {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  if (typeof error === 'string') {
+    return error;
+  }
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return 'Неизвестная ошибка';
+  }
+};
+
+const modelFileUrls = (modelId: string): string[] => [
+  `https://huggingface.co/${modelId}/resolve/main/config.json`,
+  `https://huggingface.co/${modelId}/resolve/main/tokenizer_config.json`,
+];
+
+const checkModelFile = async (url: string) => {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), MODEL_CHECK_TIMEOUT_MS);
+
+  try {
+    const headResponse = await fetch(url, { method: 'HEAD', mode: 'cors', signal: controller.signal });
+    if (headResponse.ok) {
+      return;
+    }
+
+    const getResponse = await fetch(url, { method: 'GET', mode: 'cors', signal: controller.signal });
+    if (!getResponse.ok) {
+      throw new Error(`HTTP ${getResponse.status}`);
+    }
+  } finally {
+    window.clearTimeout(timer);
+  }
+};
+
+const verifyModelAvailability = async (modelId: string) => {
+  if (checkedModels.has(modelId)) {
+    return;
+  }
+
+  const urls = modelFileUrls(modelId);
+  for (const url of urls) {
+    try {
+      await checkModelFile(url);
+    } catch (error) {
+      throw new Error(`Недоступен файл модели: ${url}. Причина: ${getErrorMessage(error)}`);
+    }
+  }
+
+  checkedModels.add(modelId);
+};
+
+const decodeViaMediaElement = async (file: File): Promise<Float32Array> => {
+  const objectUrl = URL.createObjectURL(file);
+  const audio = document.createElement('audio');
+  audio.src = objectUrl;
+  audio.preload = 'auto';
+  audio.muted = true;
+
+  const context = new AudioContext({ sampleRate: 16_000 });
+  const source = context.createMediaElementSource(audio);
+  const processor = context.createScriptProcessor(4096, 2, 1);
+  const sink = context.createMediaStreamDestination();
+  const samples: number[] = [];
+
+  source.connect(processor);
+  processor.connect(sink);
+  source.connect(sink);
+
+  return new Promise<Float32Array>((resolve, reject) => {
+    const cleanup = async () => {
+      processor.disconnect();
+      source.disconnect();
+      sink.disconnect();
+      audio.pause();
+      audio.removeAttribute('src');
+      audio.load();
+      URL.revokeObjectURL(objectUrl);
+      await context.close();
+    };
+
+    processor.onaudioprocess = (event) => {
+      const input = event.inputBuffer;
+      const channels = input.numberOfChannels;
+      const length = input.length;
+
+      for (let i = 0; i < length; i += 1) {
+        let mixed = 0;
+        for (let channel = 0; channel < channels; channel += 1) {
+          mixed += input.getChannelData(channel)[i] / channels;
+        }
+        samples.push(mixed);
+      }
+    };
+
+    audio.onended = async () => {
+      await cleanup();
+      resolve(Float32Array.from(samples));
+    };
+
+    audio.onerror = async () => {
+      await cleanup();
+      reject(new Error('Браузер не смог декодировать медиа через <audio>.'));
+    };
+
+    audio.onloadedmetadata = async () => {
+      try {
+        await context.resume();
+        await audio.play();
+      } catch (error) {
+        await cleanup();
+        reject(new Error(`Не удалось воспроизвести медиа через <audio>: ${getErrorMessage(error)}`));
+      }
+    };
+  });
+};
+
+const decodeFileToMonoFloat32 = async (file: File): Promise<Float32Array> => {
+  const arrayBuffer = await file.arrayBuffer();
+  const audioContext = new AudioContext({ sampleRate: 16_000 });
+
+  try {
+    const audioBuffer = await audioContext.decodeAudioData(arrayBuffer.slice(0));
+    const channels = audioBuffer.numberOfChannels;
+    const length = audioBuffer.length;
+
+    if (channels === 1) {
+      return new Float32Array(audioBuffer.getChannelData(0));
+    }
+
+    const mono = new Float32Array(length);
+    for (let channel = 0; channel < channels; channel += 1) {
+      const data = audioBuffer.getChannelData(channel);
+      for (let i = 0; i < length; i += 1) {
+        mono[i] += data[i] / channels;
+      }
+    }
+    return mono;
+  } catch {
+    return decodeViaMediaElement(file);
+  } finally {
+    await audioContext.close();
+  }
+};
+
 const App = () => {
   const [selectedModel, setSelectedModel] = useState<(typeof MODELS)[number]['value']>(MODELS[0].value);
   const [selectedDevice, setSelectedDevice] = useState<Device>('wasm');
@@ -78,6 +228,7 @@ const App = () => {
   const [statusText, setStatusText] = useState('Выберите файл и нажмите «Транскрибировать».');
   const [statusHint, setStatusHint] = useState('');
   const [statusPercent, setStatusPercent] = useState<number | null>(null);
+  const [errorDetails, setErrorDetails] = useState('');
   const [file, setFile] = useState<File | null>(null);
   const [transcript, setTranscript] = useState<TranscriptResult | null>(null);
   const [lastProgressAt, setLastProgressAt] = useState<number>(0);
@@ -99,20 +250,24 @@ const App = () => {
     return () => window.clearInterval(timer);
   }, [lastProgressAt, status]);
 
-  const loadPipeline = async () => {
-    const cacheKey = `${selectedModel}::${selectedDevice}`;
+  const loadPipeline = async (device: Device) => {
+    const cacheKey = `${selectedModel}::${device}`;
     if (currentAsr && currentCacheKey === cacheKey) return currentAsr;
 
     setStatus('loading-model');
-    setStatusText('Загружаем модель. При первом запуске это может занять несколько минут.');
+    setStatusText('Проверяем доступность файлов модели...');
     setStatusHint('');
     setStatusPercent(0);
     setLastProgressAt(Date.now());
 
+    await verifyModelAvailability(selectedModel);
+
+    setStatusText(`Загружаем модель (${device === 'webgpu' ? 'GPU' : 'CPU'})...`);
+
     const fileProgress = new Map<string, number>();
 
     currentAsr = await pipeline('automatic-speech-recognition', selectedModel, ({
-      device: selectedDevice,
+      device,
       progress_callback: (progress: ProgressInfo) => {
         const part = progress.file ?? progress.status ?? 'модель';
         setLastProgressAt(Date.now());
@@ -129,15 +284,44 @@ const App = () => {
           setStatusPercent(average);
           setStatusText(`Загрузка: ${part} (${currentPercent}%)`);
         } else {
-          setStatusPercent(null);
           setStatusText(`Загрузка: ${part}`);
         }
       },
     }) as any);
+
     currentCacheKey = cacheKey;
     setStatusPercent(100);
-    setStatusHint('');
     return currentAsr;
+  };
+
+  const runTranscription = async (deviceToUse: Device) => {
+    if (!file) return;
+
+    const asr = await loadPipeline(deviceToUse);
+
+    setStatus('transcribing');
+    setStatusText('Модель загружена. Подготавливаем аудио...');
+    setStatusHint('');
+    setStatusPercent(null);
+
+    const audioData = await decodeFileToMonoFloat32(file);
+
+    setStatusText('Расшифровываем аудио...');
+
+    const result = (await (asr as any)(audioData, {
+      chunk_length_s: 30,
+      stride_length_s: 5,
+      return_timestamps: true,
+      language: 'russian',
+      task: 'transcribe',
+    })) as TranscriptResult;
+
+    setTranscript(result);
+    setStatus('done');
+    setStatusPercent(100);
+    setStatusText('Готово! Можно скачать TXT/SRT или скопировать текст.');
+    setStatusHint('');
+    setErrorDetails('');
   };
 
   const handleTranscribe = async () => {
@@ -148,33 +332,33 @@ const App = () => {
     setStatusText('Идёт распознавание речи...');
     setStatusHint('');
     setStatusPercent(null);
+    setErrorDetails('');
 
     try {
-      const asr = await loadPipeline();
-      setStatus('transcribing');
-      setStatusText('Модель загружена. Расшифровываем аудио...');
-      setStatusHint('');
-      setStatusPercent(null);
-
-      const result = (await (asr as any)(file, {
-        chunk_length_s: 30,
-        stride_length_s: 5,
-        return_timestamps: true,
-        language: 'russian',
-        task: 'transcribe',
-      })) as TranscriptResult;
-
-      setTranscript(result);
-      setStatus('done');
-      setStatusPercent(100);
-      setStatusText('Готово! Можно скачать TXT/SRT или скопировать текст.');
-      setStatusHint('');
+      await runTranscription(selectedDevice);
     } catch (error) {
       console.error(error);
+
+      if (selectedDevice === 'webgpu') {
+        try {
+          setStatus('loading-model');
+          setStatusText('GPU недоступен или нестабилен. Переключаемся на CPU (WASM)...');
+          setStatusHint('Авто-фолбэк активирован: повторяем загрузку/транскрибацию на CPU.');
+          await runTranscription('wasm');
+          setSelectedDevice('wasm');
+          return;
+        } catch (fallbackError) {
+          console.error(fallbackError);
+          setErrorDetails(getErrorMessage(fallbackError));
+        }
+      } else {
+        setErrorDetails(getErrorMessage(error));
+      }
+
       setStatus('error');
       setStatusPercent(null);
-      setStatusHint('');
-      setStatusText('Ошибка транскрибации. Если загрузка зависает на config.json/tokenizer_config.json — переключите на CPU (WASM), модель Tiny и проверьте сеть без VPN/прокси.');
+      setStatusText('Ошибка транскрибации. Если загрузка зависает на config.json/tokenizer_config.json — попробуйте CPU (WASM), Tiny/Base и проверьте сеть без VPN/прокси.');
+      setStatusHint('Проверьте интернет: модели скачиваются при первом запуске из Hugging Face. Без сети/при блокировке загрузка не завершится.');
     }
   };
 
@@ -241,12 +425,13 @@ const App = () => {
         </button>
 
         <div className="progress-wrap" aria-hidden={statusPercent === null}>
-          <progress value={statusPercent ?? undefined} max={100} />
+          <progress value={statusPercent ?? 0} max={100} />
           <span>{statusPercent !== null ? `${statusPercent}%` : '—'}</span>
         </div>
 
         <p className={`status ${status}`}>{statusText}</p>
         {statusHint && <p className="status-hint">{statusHint}</p>}
+        {errorDetails && <pre className="error-details">{errorDetails}</pre>}
       </section>
 
       <section className="panel">
