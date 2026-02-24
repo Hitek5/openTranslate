@@ -16,13 +16,28 @@ type TranscriptResult = {
 };
 
 type Status = 'idle' | 'loading-model' | 'transcribing' | 'done' | 'error';
+type Device = 'wasm' | 'webgpu';
+
+type ProgressInfo = {
+  file?: string;
+  progress?: number;
+  loaded?: number;
+  total?: number;
+  status?: string;
+};
 
 const MODELS = [
   { value: 'Xenova/whisper-tiny', label: 'Whisper Tiny (быстро)' },
-  { value: 'Xenova/whisper-base', label: 'Whisper Base (точнее)' },
+  { value: 'Xenova/whisper-base', label: 'Whisper Base (баланс)' },
+  { value: 'onnx-community/whisper-large-v3-turbo', label: 'Whisper Large v3 Turbo (точнее, тяжелее)' },
 ] as const;
 
-let currentModelName = '';
+const DEVICES: { value: Device; label: string; hint: string }[] = [
+  { value: 'wasm', label: 'CPU (WASM)', hint: 'Стабильно на любом ПК, но медленнее.' },
+  { value: 'webgpu', label: 'GPU (WebGPU)', hint: 'Быстрее, если браузер и видеокарта поддерживают WebGPU.' },
+];
+
+let currentCacheKey = '';
 let currentAsr: Awaited<ReturnType<typeof pipeline>> | null = null;
 
 const formatSeconds = (value: number): string => {
@@ -42,30 +57,63 @@ const toSrt = (chunks: Chunk[]): string =>
     })
     .join('\n');
 
+const getNormalizedPercent = (value?: number): number | null => {
+  if (typeof value !== 'number' || Number.isNaN(value)) {
+    return null;
+  }
+
+  if (value <= 1) {
+    return Math.min(100, Math.max(0, Math.round(value * 100)));
+  }
+
+  return Math.min(100, Math.max(0, Math.round(value)));
+};
+
 const App = () => {
   const [selectedModel, setSelectedModel] = useState<(typeof MODELS)[number]['value']>(MODELS[0].value);
+  const [selectedDevice, setSelectedDevice] = useState<Device>('wasm');
   const [status, setStatus] = useState<Status>('idle');
   const [statusText, setStatusText] = useState('Выберите файл и нажмите «Транскрибировать».');
+  const [statusPercent, setStatusPercent] = useState<number | null>(null);
   const [file, setFile] = useState<File | null>(null);
   const [transcript, setTranscript] = useState<TranscriptResult | null>(null);
 
   const canTranscribe = useMemo(() => !!file && (status === 'idle' || status === 'done' || status === 'error'), [file, status]);
 
   const loadPipeline = async () => {
-    if (currentAsr && currentModelName === selectedModel) return currentAsr;
+    const cacheKey = `${selectedModel}::${selectedDevice}`;
+    if (currentAsr && currentCacheKey === cacheKey) return currentAsr;
 
     setStatus('loading-model');
-    setStatusText('Загружаем модель. Это может занять несколько минут при первом запуске.');
+    setStatusText('Загружаем модель. При первом запуске это может занять несколько минут.');
+    setStatusPercent(0);
 
-    currentAsr = await pipeline('automatic-speech-recognition', selectedModel, {
-      progress_callback: (progress: { file?: string; progress?: number }) => {
-        if (!progress) return;
-        const part = progress.file ?? 'модель';
-        const percentage = progress.progress ? ` (${Math.round(progress.progress)}%)` : '';
-        setStatusText(`Загрузка: ${part}${percentage}`);
+    const fileProgress = new Map<string, number>();
+
+    currentAsr = await pipeline('automatic-speech-recognition', selectedModel, ({
+      device: selectedDevice,
+      progress_callback: (progress: ProgressInfo) => {
+        const part = progress.file ?? progress.status ?? 'модель';
+
+        let currentPercent = getNormalizedPercent(progress.progress);
+        if (currentPercent === null && typeof progress.loaded === 'number' && typeof progress.total === 'number' && progress.total > 0) {
+          currentPercent = getNormalizedPercent((progress.loaded / progress.total) * 100);
+        }
+
+        if (currentPercent !== null) {
+          fileProgress.set(part, currentPercent);
+          const values = [...fileProgress.values()];
+          const average = Math.round(values.reduce((sum, item) => sum + item, 0) / values.length);
+          setStatusPercent(average);
+          setStatusText(`Загрузка: ${part} (${currentPercent}%)`);
+        } else {
+          setStatusPercent(null);
+          setStatusText(`Загрузка: ${part}`);
+        }
       },
-    });
-    currentModelName = selectedModel;
+    }) as any);
+    currentCacheKey = cacheKey;
+    setStatusPercent(100);
     return currentAsr;
   };
 
@@ -75,9 +123,14 @@ const App = () => {
     setTranscript(null);
     setStatus('transcribing');
     setStatusText('Идёт распознавание речи...');
+    setStatusPercent(null);
 
     try {
       const asr = await loadPipeline();
+      setStatus('transcribing');
+      setStatusText('Модель загружена. Расшифровываем аудио...');
+      setStatusPercent(null);
+
       const result = (await (asr as any)(file, {
         chunk_length_s: 30,
         stride_length_s: 5,
@@ -88,11 +141,13 @@ const App = () => {
 
       setTranscript(result);
       setStatus('done');
-      setStatusText('Готово! Можно скопировать текст или скачать файлы.');
+      setStatusPercent(100);
+      setStatusText('Готово! Можно скачать TXT/SRT или скопировать текст.');
     } catch (error) {
       console.error(error);
       setStatus('error');
-      setStatusText('Ошибка транскрибации. Проверьте консоль браузера и попробуйте другой файл.');
+      setStatusPercent(null);
+      setStatusText('Ошибка транскрибации. Если выбран GPU — попробуйте CPU (WASM) и/или модель поменьше.');
     }
   };
 
@@ -117,15 +172,32 @@ const App = () => {
         <h1>OpenTranscribe RU</h1>
         <p className="lead">Локальная транскрибация аудио и видео в браузере без отправки на сервер.</p>
 
+        <fieldset className="field model-radio-group">
+          <legend>Модель Whisper</legend>
+          {MODELS.map((model) => (
+            <label key={model.value} className="radio-item">
+              <input
+                type="radio"
+                name="whisper-model"
+                value={model.value}
+                checked={selectedModel === model.value}
+                onChange={() => setSelectedModel(model.value)}
+              />
+              <span>{model.label}</span>
+            </label>
+          ))}
+        </fieldset>
+
         <label className="field">
-          <span>Модель Whisper</span>
-          <select value={selectedModel} onChange={(event) => setSelectedModel(event.target.value as (typeof MODELS)[number]['value'])}>
-            {MODELS.map((model) => (
-              <option key={model.value} value={model.value}>
-                {model.label}
+          <span>Устройство обработки</span>
+          <select value={selectedDevice} onChange={(event) => setSelectedDevice(event.target.value as Device)}>
+            {DEVICES.map((device) => (
+              <option key={device.value} value={device.value}>
+                {device.label}
               </option>
             ))}
           </select>
+          <small className="hint">{DEVICES.find((item) => item.value === selectedDevice)?.hint}</small>
         </label>
 
         <label className="field">
@@ -140,6 +212,11 @@ const App = () => {
         <button onClick={handleTranscribe} disabled={!canTranscribe}>
           Транскрибировать
         </button>
+
+        <div className="progress-wrap" aria-hidden={statusPercent === null}>
+          <progress value={statusPercent ?? undefined} max={100} />
+          <span>{statusPercent !== null ? `${statusPercent}%` : '—'}</span>
+        </div>
 
         <p className={`status ${status}`}>{statusText}</p>
       </section>
