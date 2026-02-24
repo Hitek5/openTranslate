@@ -1,0 +1,157 @@
+:root {
+  font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+  color: #123046;
+  background: linear-gradient(180deg, #ecfeff 0%, #f0fdf4 100%);
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  min-height: 100vh;
+}
+
+.app {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 2rem 1rem;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 1rem;
+}
+
+.panel {
+  background: #ffffff;
+  border: 1px solid #bae6fd;
+  border-radius: 14px;
+  padding: 1rem;
+  box-shadow: 0 12px 30px rgba(14, 116, 144, 0.08);
+}
+
+h1, h2 { margin: 0 0 0.75rem; color: #0f766e; }
+
+.lead {
+  color: #0f766e;
+  opacity: 0.9;
+  margin-bottom: 1rem;
+}
+
+.field {
+  display: grid;
+  gap: 0.35rem;
+  margin-bottom: 0.9rem;
+}
+
+input, select, button, textarea {
+  width: 100%;
+  border: 1px solid #99f6e4;
+  border-radius: 10px;
+  background: #f8fffe;
+  color: #123046;
+  padding: 0.6rem 0.75rem;
+}
+
+input:focus, select:focus, textarea:focus {
+  outline: 2px solid #5eead4;
+  outline-offset: 1px;
+}
+
+button {
+  cursor: pointer;
+  background: linear-gradient(90deg, #14b8a6 0%, #22c55e 100%);
+  color: #ffffff;
+  border: none;
+  font-weight: 600;
+}
+
+button:hover:not(:disabled) {
+  filter: brightness(1.03);
+}
+
+button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.status {
+  margin-top: 0.8rem;
+  font-size: 0.95rem;
+  color: #0e7490;
+}
+
+.status.error { color: #dc2626; }
+.status.done { color: #16a34a; }
+
+.result-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 0.75rem;
+}
+
+textarea {
+  min-height: 450px;
+  resize: vertical;
+}
+
+.hint {
+  color: #0f766e;
+  font-size: 0.85rem;
+}
+
+.progress-wrap {
+  margin-top: 0.85rem;
+  display: flex;
+  gap: 0.6rem;
+  align-items: center;
+}
+
+.progress-wrap[aria-hidden="true"] {
+  opacity: 0.6;
+}
+
+progress {
+  width: 100%;
+  height: 0.75rem;
+  accent-color: #14b8a6;
+}
+
+.progress-wrap span {
+  min-width: 3.2rem;
+  text-align: right;
+  color: #0f766e;
+  font-size: 0.85rem;
+}
+
+.model-radio-group {
+  border: 1px solid #99f6e4;
+  border-radius: 10px;
+  padding: 0.65rem 0.75rem;
+  background: #f8fffe;
+}
+
+.model-radio-group legend {
+  padding: 0 0.35rem;
+  color: #0f766e;
+  font-weight: 600;
+}
+
+.radio-item {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  margin-bottom: 0.45rem;
+  cursor: pointer;
+  color: #123046;
+}
+
+.radio-item:last-child {
+  margin-bottom: 0;
+}
+
+.radio-item input[type="radio"] {
+  width: auto;
+  accent-color: #14b8a6;
+  transform: translateY(-1px);
+}
