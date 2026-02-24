@@ -22,3 +22,31 @@
     npm run dev
     ```
 5.  Откройте ссылку, которая появится в терминале (обычно `http://localhost:5173`), в вашем браузере.
+
+
+## Запуск на Windows
+
+### Быстрый запуск (BAT-файл)
+
+1. Убедитесь, что установлен **Node.js 18+** (вместе с npm).
+2. В проводнике откройте папку проекта и дважды кликните `start-windows.bat`.
+3. Скрипт автоматически:
+   - проверит `node` и `npm`;
+   - выполнит `npm install`;
+   - запустит dev-сервер на `http://localhost:5173`.
+
+### Ручной запуск (PowerShell)
+
+```powershell
+cd C:\path\to\openTranslate
+npm install
+npm run dev
+```
+
+### Ручной запуск (CMD)
+
+```cmd
+cd C:\path\to\openTranslate
+npm install
+npm run dev
+```
