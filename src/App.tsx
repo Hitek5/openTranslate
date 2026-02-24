@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { pipeline } from '@xenova/transformers';
 import JSZip from 'jszip';
 import { saveAs } from 'file-saver';
@@ -37,6 +37,8 @@ const DEVICES: { value: Device; label: string; hint: string }[] = [
   { value: 'webgpu', label: 'GPU (WebGPU)', hint: 'Быстрее, если браузер и видеокарта поддерживают WebGPU.' },
 ];
 
+const STALL_WARNING_MS = 20_000;
+
 let currentCacheKey = '';
 let currentAsr: Awaited<ReturnType<typeof pipeline>> | null = null;
 
@@ -74,11 +76,28 @@ const App = () => {
   const [selectedDevice, setSelectedDevice] = useState<Device>('wasm');
   const [status, setStatus] = useState<Status>('idle');
   const [statusText, setStatusText] = useState('Выберите файл и нажмите «Транскрибировать».');
+  const [statusHint, setStatusHint] = useState('');
   const [statusPercent, setStatusPercent] = useState<number | null>(null);
   const [file, setFile] = useState<File | null>(null);
   const [transcript, setTranscript] = useState<TranscriptResult | null>(null);
+  const [lastProgressAt, setLastProgressAt] = useState<number>(0);
 
   const canTranscribe = useMemo(() => !!file && (status === 'idle' || status === 'done' || status === 'error'), [file, status]);
+
+  useEffect(() => {
+    if (status !== 'loading-model') {
+      return;
+    }
+
+    const timer = window.setInterval(() => {
+      const stalled = Date.now() - lastProgressAt > STALL_WARNING_MS;
+      if (stalled) {
+        setStatusHint('Загрузка долго стоит на одном файле. Обычно помогает: подождать 1-2 минуты, переключить GPU→CPU (WASM), отключить VPN/прокси и попробовать модель Tiny/Base.');
+      }
+    }, 1000);
+
+    return () => window.clearInterval(timer);
+  }, [lastProgressAt, status]);
 
   const loadPipeline = async () => {
     const cacheKey = `${selectedModel}::${selectedDevice}`;
@@ -86,7 +105,9 @@ const App = () => {
 
     setStatus('loading-model');
     setStatusText('Загружаем модель. При первом запуске это может занять несколько минут.');
+    setStatusHint('');
     setStatusPercent(0);
+    setLastProgressAt(Date.now());
 
     const fileProgress = new Map<string, number>();
 
@@ -94,6 +115,7 @@ const App = () => {
       device: selectedDevice,
       progress_callback: (progress: ProgressInfo) => {
         const part = progress.file ?? progress.status ?? 'модель';
+        setLastProgressAt(Date.now());
 
         let currentPercent = getNormalizedPercent(progress.progress);
         if (currentPercent === null && typeof progress.loaded === 'number' && typeof progress.total === 'number' && progress.total > 0) {
@@ -114,6 +136,7 @@ const App = () => {
     }) as any);
     currentCacheKey = cacheKey;
     setStatusPercent(100);
+    setStatusHint('');
     return currentAsr;
   };
 
@@ -123,12 +146,14 @@ const App = () => {
     setTranscript(null);
     setStatus('transcribing');
     setStatusText('Идёт распознавание речи...');
+    setStatusHint('');
     setStatusPercent(null);
 
     try {
       const asr = await loadPipeline();
       setStatus('transcribing');
       setStatusText('Модель загружена. Расшифровываем аудио...');
+      setStatusHint('');
       setStatusPercent(null);
 
       const result = (await (asr as any)(file, {
@@ -143,11 +168,13 @@ const App = () => {
       setStatus('done');
       setStatusPercent(100);
       setStatusText('Готово! Можно скачать TXT/SRT или скопировать текст.');
+      setStatusHint('');
     } catch (error) {
       console.error(error);
       setStatus('error');
       setStatusPercent(null);
-      setStatusText('Ошибка транскрибации. Если выбран GPU — попробуйте CPU (WASM) и/или модель поменьше.');
+      setStatusHint('');
+      setStatusText('Ошибка транскрибации. Если загрузка зависает на config.json/tokenizer_config.json — переключите на CPU (WASM), модель Tiny и проверьте сеть без VPN/прокси.');
     }
   };
 
@@ -219,6 +246,7 @@ const App = () => {
         </div>
 
         <p className={`status ${status}`}>{statusText}</p>
+        {statusHint && <p className="status-hint">{statusHint}</p>}
       </section>
 
       <section className="panel">
