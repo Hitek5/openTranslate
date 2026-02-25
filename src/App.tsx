@@ -93,6 +93,20 @@ const isHtmlResponse = (contentType: string, body: string): boolean => {
   return contentType.includes('text/html') || normalized.startsWith('<!doctype') || normalized.startsWith('<html');
 };
 
+
+const isModelAccessError = (message: string): boolean => {
+  const m = message.toLowerCase();
+  return m.includes('unexpected token "<"')
+    || m.includes('unexpected token "<"')
+    || m.includes('html вместо json')
+    || m.includes('http 401')
+    || m.includes('http 403')
+    || m.includes('http 429')
+    || m.includes('failed to fetch')
+    || m.includes('cors')
+    || m.includes('networkerror');
+};
+
 const modelFileUrls = (modelId: string): string[] => [
   `https://huggingface.co/${modelId}/resolve/main/config.json`,
   `https://huggingface.co/${modelId}/resolve/main/tokenizer_config.json`,
@@ -362,6 +376,16 @@ const App = () => {
       await runTranscription(selectedDevice);
     } catch (error) {
       console.error(error);
+      const primaryError = getErrorMessage(error);
+
+      if (isModelAccessError(primaryError)) {
+        setStatus('error');
+        setStatusPercent(null);
+        setStatusText('Не удалось скачать файлы модели с Hugging Face (доступ ограничен или перехватывается HTML-страницей).');
+        setStatusHint('GPU/CPU здесь не помогут, пока не будет прямого доступа к huggingface.co без VPN/прокси/фильтра.');
+        setErrorDetails(primaryError);
+        return;
+      }
 
       if (selectedDevice === 'webgpu') {
         try {
@@ -373,11 +397,11 @@ const App = () => {
           return;
         } catch (fallbackError) {
           console.error(fallbackError);
-          setErrorDetails(`GPU error: ${getErrorMessage(error)}
+          setErrorDetails(`GPU error: ${primaryError}
 CPU fallback error: ${getErrorMessage(fallbackError)}`);
         }
       } else {
-        setErrorDetails(getErrorMessage(error));
+        setErrorDetails(primaryError);
       }
 
       setStatus('error');

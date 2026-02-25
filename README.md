@@ -107,3 +107,4 @@ npm run dev
 - При ошибках теперь показывается явный технический текст ошибки в интерфейсе.
 - Если `decodeAudioData` не поддерживает конкретный контейнер/кодек, используется fallback через `<audio>` + `MediaElementAudioSource`.
 - Ошибка вида `Unexpected token "<" ... is not valid JSON` почти всегда значит, что вместо JSON вернулась HTML-страница (редирект/блокировка).
+- Если видите `GPU error ... Unexpected token "<" ...` и `CPU fallback error ... Unexpected token "<" ...`, это не проблема GPU: доступ к модели заблокирован на уровне сети.
