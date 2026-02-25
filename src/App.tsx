@@ -87,6 +87,12 @@ const getErrorMessage = (error: unknown): string => {
   }
 };
 
+
+const isHtmlResponse = (contentType: string, body: string): boolean => {
+  const normalized = body.trimStart().slice(0, 80).toLowerCase();
+  return contentType.includes('text/html') || normalized.startsWith('<!doctype') || normalized.startsWith('<html');
+};
+
 const modelFileUrls = (modelId: string): string[] => [
   `https://huggingface.co/${modelId}/resolve/main/config.json`,
   `https://huggingface.co/${modelId}/resolve/main/tokenizer_config.json`,
@@ -97,14 +103,32 @@ const checkModelFile = async (url: string) => {
   const timer = window.setTimeout(() => controller.abort(), MODEL_CHECK_TIMEOUT_MS);
 
   try {
-    const headResponse = await fetch(url, { method: 'HEAD', mode: 'cors', signal: controller.signal });
-    if (headResponse.ok) {
-      return;
+    const headResponse = await fetch(url, { method: 'HEAD', mode: 'cors', signal: controller.signal, redirect: 'follow' });
+    if (!headResponse.ok) {
+      throw new Error(`HTTP ${headResponse.status}`);
     }
 
-    const getResponse = await fetch(url, { method: 'GET', mode: 'cors', signal: controller.signal });
+    const headType = (headResponse.headers.get('content-type') ?? '').toLowerCase();
+    if (headType.includes('text/html')) {
+      throw new Error('Сервер вернул HTML вместо JSON (возможна блокировка/редирект).');
+    }
+
+    const getResponse = await fetch(url, { method: 'GET', mode: 'cors', signal: controller.signal, redirect: 'follow' });
     if (!getResponse.ok) {
       throw new Error(`HTTP ${getResponse.status}`);
+    }
+
+    const contentType = (getResponse.headers.get('content-type') ?? '').toLowerCase();
+    const body = await getResponse.text();
+
+    if (isHtmlResponse(contentType, body)) {
+      throw new Error('Получен HTML вместо JSON (Unexpected token "<"). Проверьте VPN/прокси/блокировки Hugging Face.');
+    }
+
+    try {
+      JSON.parse(body);
+    } catch {
+      throw new Error('Получен невалидный JSON в файле модели.');
     }
   } finally {
     window.clearTimeout(timer);
@@ -349,7 +373,8 @@ const App = () => {
           return;
         } catch (fallbackError) {
           console.error(fallbackError);
-          setErrorDetails(getErrorMessage(fallbackError));
+          setErrorDetails(`GPU error: ${getErrorMessage(error)}
+CPU fallback error: ${getErrorMessage(fallbackError)}`);
         }
       } else {
         setErrorDetails(getErrorMessage(error));

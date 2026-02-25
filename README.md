@@ -106,3 +106,4 @@ npm run dev
 - Перед загрузкой pipeline выполняется pre-check доступности ключевых файлов модели (`config.json`, `tokenizer_config.json`).
 - При ошибках теперь показывается явный технический текст ошибки в интерфейсе.
 - Если `decodeAudioData` не поддерживает конкретный контейнер/кодек, используется fallback через `<audio>` + `MediaElementAudioSource`.
+- Ошибка вида `Unexpected token "<" ... is not valid JSON` почти всегда значит, что вместо JSON вернулась HTML-страница (редирект/блокировка).
