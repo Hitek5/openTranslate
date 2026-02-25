@@ -124,14 +124,14 @@ const checkModelFile = async (url: string) => {
   const timer = window.setTimeout(() => controller.abort(), MODEL_CHECK_TIMEOUT_MS);
 
   try {
-    const headResponse = await fetch(url, { method: 'HEAD', mode: 'cors', signal: controller.signal, redirect: 'follow' });
-    if (!headResponse.ok) {
-      throw new Error(`HTTP ${headResponse.status}`);
-    }
-
-    const headType = (headResponse.headers.get('content-type') ?? '').toLowerCase();
-    if (headType.includes('text/html')) {
-      throw new Error('Сервер вернул HTML вместо JSON (возможна блокировка/редирект).');
+    try {
+      const headResponse = await fetch(url, { method: 'HEAD', mode: 'cors', signal: controller.signal, redirect: 'follow' });
+      const headType = (headResponse.headers.get('content-type') ?? '').toLowerCase();
+      if (headResponse.ok && headType.includes('text/html')) {
+        throw new Error('Сервер вернул HTML вместо JSON (возможна блокировка/редирект).');
+      }
+    } catch {
+      // Некоторые зеркала/прокси блокируют HEAD. Пробуем GET как основной источник истины.
     }
 
     const getResponse = await fetch(url, { method: 'GET', mode: 'cors', signal: controller.signal, redirect: 'follow' });
@@ -298,49 +298,74 @@ const App = () => {
   }, [lastProgressAt, status]);
 
   const loadPipeline = async (device: Device) => {
-    const source = MODEL_SOURCES.find((item) => item.value === selectedSource) ?? MODEL_SOURCES[0];
-    const cacheKey = `${source.host}::${selectedModel}::${device}`;
-    if (currentAsr && currentCacheKey === cacheKey) return currentAsr;
+    const preferred = MODEL_SOURCES.find((item) => item.value === selectedSource) ?? MODEL_SOURCES[0];
+    const fallbackSources = MODEL_SOURCES.filter((item) => item.value !== preferred.value);
+    const sourcesToTry = [preferred, ...fallbackSources];
+    const sourceErrors: string[] = [];
 
-    setStatus('loading-model');
-    setStatusText('Проверяем доступность файлов модели...');
-    setStatusHint('');
-    setStatusPercent(0);
-    setLastProgressAt(Date.now());
+    for (const source of sourcesToTry) {
+      const cacheKey = `${source.host}::${selectedModel}::${device}`;
+      if (currentAsr && currentCacheKey === cacheKey) {
+        return currentAsr;
+      }
 
-    await verifyModelAvailability(selectedModel, source.host);
-
-    env.remoteHost = `${source.host}/`;
-    setStatusText(`Загружаем модель (${device === 'webgpu' ? 'GPU' : 'CPU'})...`);
-
-    const fileProgress = new Map<string, number>();
-
-    currentAsr = await pipeline('automatic-speech-recognition', selectedModel, ({
-      device,
-      progress_callback: (progress: ProgressInfo) => {
-        const part = progress.file ?? progress.status ?? 'модель';
+      try {
+        setStatus('loading-model');
+        setStatusText(`Проверяем доступность файлов модели (${source.label})...`);
+        setStatusHint('');
+        setStatusPercent(0);
         setLastProgressAt(Date.now());
 
-        let currentPercent = getNormalizedPercent(progress.progress);
-        if (currentPercent === null && typeof progress.loaded === 'number' && typeof progress.total === 'number' && progress.total > 0) {
-          currentPercent = getNormalizedPercent((progress.loaded / progress.total) * 100);
+        await verifyModelAvailability(selectedModel, source.host);
+
+        env.remoteHost = `${source.host}/`;
+        setStatusText(`Загружаем модель (${device === 'webgpu' ? 'GPU' : 'CPU'}) из ${source.label}...`);
+
+        const fileProgress = new Map<string, number>();
+
+        currentAsr = await pipeline('automatic-speech-recognition', selectedModel, ({
+          device,
+          progress_callback: (progress: ProgressInfo) => {
+            const part = progress.file ?? progress.status ?? 'модель';
+            setLastProgressAt(Date.now());
+
+            let currentPercent = getNormalizedPercent(progress.progress);
+            if (currentPercent === null && typeof progress.loaded === 'number' && typeof progress.total === 'number' && progress.total > 0) {
+              currentPercent = getNormalizedPercent((progress.loaded / progress.total) * 100);
+            }
+
+            if (currentPercent !== null) {
+              fileProgress.set(part, currentPercent);
+              const values = [...fileProgress.values()];
+              const average = Math.round(values.reduce((sum, item) => sum + item, 0) / values.length);
+              setStatusPercent(average);
+              setStatusText(`Загрузка: ${part} (${currentPercent}%)`);
+            } else {
+              setStatusText(`Загрузка: ${part}`);
+            }
+          },
+        }) as any);
+
+        currentCacheKey = cacheKey;
+        setStatusPercent(100);
+
+        if (source.value !== selectedSource) {
+          setSelectedSource(source.value);
+          setStatusHint(`Основной источник недоступен. Автоматически переключено на: ${source.label}.`);
         }
 
-        if (currentPercent !== null) {
-          fileProgress.set(part, currentPercent);
-          const values = [...fileProgress.values()];
-          const average = Math.round(values.reduce((sum, item) => sum + item, 0) / values.length);
-          setStatusPercent(average);
-          setStatusText(`Загрузка: ${part} (${currentPercent}%)`);
-        } else {
-          setStatusText(`Загрузка: ${part}`);
-        }
-      },
-    }) as any);
+        return currentAsr;
+      } catch (error) {
+        const message = getErrorMessage(error);
+        sourceErrors.push(`${source.label}: ${message}`);
 
-    currentCacheKey = cacheKey;
-    setStatusPercent(100);
-    return currentAsr;
+        if (!isModelAccessError(message)) {
+          throw error;
+        }
+      }
+    }
+
+    throw new Error(`Не удалось загрузить модель ни из одного источника.\n${sourceErrors.join("\n")}`);
   };
 
   const runTranscription = async (deviceToUse: Device) => {
@@ -393,7 +418,7 @@ const App = () => {
         setStatus('error');
         setStatusPercent(null);
         setStatusText('Не удалось скачать файлы модели (доступ ограничен или перехватывается HTML-страницей).');
-        setStatusHint('Попробуйте переключить «Источник модели» на HF-Mirror. Если не помогло — проверьте сеть/VPN/прокси/фильтр.');
+        setStatusHint('Попробуйте другой источник модели в списке. Если оба не работают — проблема в сети/VPN/прокси/фильтре.');
         setErrorDetails(primaryError);
         return;
       }
