@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { pipeline } from '@xenova/transformers';
+import { env, pipeline } from '@xenova/transformers';
 import JSZip from 'jszip';
 import { saveAs } from 'file-saver';
 
@@ -25,6 +25,14 @@ type ProgressInfo = {
   total?: number;
   status?: string;
 };
+
+
+type ModelSource = 'huggingface' | 'hf-mirror';
+
+const MODEL_SOURCES: { value: ModelSource; label: string; host: string }[] = [
+  { value: 'huggingface', label: 'Hugging Face (основной)', host: 'https://huggingface.co' },
+  { value: 'hf-mirror', label: 'HF-Mirror (если основной заблокирован)', host: 'https://hf-mirror.com' },
+];
 
 const MODELS = [
   { value: 'Xenova/whisper-tiny', label: 'Whisper Tiny (быстро)' },
@@ -97,7 +105,6 @@ const isHtmlResponse = (contentType: string, body: string): boolean => {
 const isModelAccessError = (message: string): boolean => {
   const m = message.toLowerCase();
   return m.includes('unexpected token "<"')
-    || m.includes('unexpected token "<"')
     || m.includes('html вместо json')
     || m.includes('http 401')
     || m.includes('http 403')
@@ -107,9 +114,9 @@ const isModelAccessError = (message: string): boolean => {
     || m.includes('networkerror');
 };
 
-const modelFileUrls = (modelId: string): string[] => [
-  `https://huggingface.co/${modelId}/resolve/main/config.json`,
-  `https://huggingface.co/${modelId}/resolve/main/tokenizer_config.json`,
+const modelFileUrls = (modelId: string, sourceHost: string): string[] => [
+  `${sourceHost}/${modelId}/resolve/main/config.json`,
+  `${sourceHost}/${modelId}/resolve/main/tokenizer_config.json`,
 ];
 
 const checkModelFile = async (url: string) => {
@@ -149,12 +156,13 @@ const checkModelFile = async (url: string) => {
   }
 };
 
-const verifyModelAvailability = async (modelId: string) => {
-  if (checkedModels.has(modelId)) {
+const verifyModelAvailability = async (modelId: string, sourceHost: string) => {
+  const cacheKey = `${sourceHost}::${modelId}`;
+  if (checkedModels.has(cacheKey)) {
     return;
   }
 
-  const urls = modelFileUrls(modelId);
+  const urls = modelFileUrls(modelId, sourceHost);
   for (const url of urls) {
     try {
       await checkModelFile(url);
@@ -163,7 +171,7 @@ const verifyModelAvailability = async (modelId: string) => {
     }
   }
 
-  checkedModels.add(modelId);
+  checkedModels.add(cacheKey);
 };
 
 const decodeViaMediaElement = async (file: File): Promise<Float32Array> => {
@@ -261,6 +269,7 @@ const decodeFileToMonoFloat32 = async (file: File): Promise<Float32Array> => {
 
 const App = () => {
   const [selectedModel, setSelectedModel] = useState<(typeof MODELS)[number]['value']>(MODELS[0].value);
+  const [selectedSource, setSelectedSource] = useState<ModelSource>('huggingface');
   const [selectedDevice, setSelectedDevice] = useState<Device>('wasm');
   const [status, setStatus] = useState<Status>('idle');
   const [statusText, setStatusText] = useState('Выберите файл и нажмите «Транскрибировать».');
@@ -289,7 +298,8 @@ const App = () => {
   }, [lastProgressAt, status]);
 
   const loadPipeline = async (device: Device) => {
-    const cacheKey = `${selectedModel}::${device}`;
+    const source = MODEL_SOURCES.find((item) => item.value === selectedSource) ?? MODEL_SOURCES[0];
+    const cacheKey = `${source.host}::${selectedModel}::${device}`;
     if (currentAsr && currentCacheKey === cacheKey) return currentAsr;
 
     setStatus('loading-model');
@@ -298,8 +308,9 @@ const App = () => {
     setStatusPercent(0);
     setLastProgressAt(Date.now());
 
-    await verifyModelAvailability(selectedModel);
+    await verifyModelAvailability(selectedModel, source.host);
 
+    env.remoteHost = `${source.host}/`;
     setStatusText(`Загружаем модель (${device === 'webgpu' ? 'GPU' : 'CPU'})...`);
 
     const fileProgress = new Map<string, number>();
@@ -381,8 +392,8 @@ const App = () => {
       if (isModelAccessError(primaryError)) {
         setStatus('error');
         setStatusPercent(null);
-        setStatusText('Не удалось скачать файлы модели с Hugging Face (доступ ограничен или перехватывается HTML-страницей).');
-        setStatusHint('GPU/CPU здесь не помогут, пока не будет прямого доступа к huggingface.co без VPN/прокси/фильтра.');
+        setStatusText('Не удалось скачать файлы модели (доступ ограничен или перехватывается HTML-страницей).');
+        setStatusHint('Попробуйте переключить «Источник модели» на HF-Mirror. Если не помогло — проверьте сеть/VPN/прокси/фильтр.');
         setErrorDetails(primaryError);
         return;
       }
@@ -447,6 +458,18 @@ CPU fallback error: ${getErrorMessage(fallbackError)}`);
             </label>
           ))}
         </fieldset>
+
+
+        <label className="field">
+          <span>Источник модели</span>
+          <select value={selectedSource} onChange={(event) => setSelectedSource(event.target.value as ModelSource)}>
+            {MODEL_SOURCES.map((source) => (
+              <option key={source.value} value={source.value}>
+                {source.label}
+              </option>
+            ))}
+          </select>
+        </label>
 
         <label className="field">
           <span>Устройство обработки</span>
